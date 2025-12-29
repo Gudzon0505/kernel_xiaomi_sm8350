@@ -1,186 +1,55 @@
-name: Build Star Kernel (SukiSU + SUSFS)
+name: STAR Kernel (SukiSU + SUSFS)
 
 on:
   workflow_dispatch:
-    inputs:
-      device:
-        description: "Device defconfig selector: star or mars"
-        required: true
-        default: "star"
-      jobs:
-        description: "Parallel build jobs"
-        required: true
-        default: "16"
-      enable_sukisu:
-        description: "Try to integrate SukiSU-Ultra"
-        required: true
-        default: "true"
-      enable_susfs:
-        description: "Try to integrate SUSFS (susfs4ksu-module)"
-        required: true
-        default: "true"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
+      - uses: actions/checkout@v4
 
       - name: Install deps
-        shell: bash
         run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            git curl wget ca-certificates rsync unzip zip xz-utils \
-            build-essential bc bison flex ccache \
-            python3 python3-pip \
-            libssl-dev libelf-dev dwarves \
-            clang lld llvm
-          clang --version
-          ld.lld --version
+          sudo apt update
+          sudo apt install -y git bc bison flex libssl-dev \
+            make clang lld llvm dwarves ccache rsync zip unzip
 
-      - name: Setup env
-        shell: bash
+      - name: Setup LLVM
         run: |
-          set -euxo pipefail
           echo "CC=clang" >> $GITHUB_ENV
           echo "LD=ld.lld" >> $GITHUB_ENV
-          echo "AR=llvm-ar" >> $GITHUB_ENV
-          echo "NM=llvm-nm" >> $GITHUB_ENV
-          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
-          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
-          echo "STRIP=llvm-strip" >> $GITHUB_ENV
           echo "LLVM=1" >> $GITHUB_ENV
           echo "LLVM_IAS=1" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
 
-          # Defconfig selector (по твоему логу star_defconfig не существует, есть star-gki_defconfig)
-          DEV="${{ github.event.inputs.device }}"
-          if [[ "$DEV" == "star" ]]; then
-            DEF="vendor/star-gki_defconfig"
-          elif [[ "$DEV" == "mars" ]]; then
-            DEF="vendor/mars_defconfig"
-          else
-            echo "Unknown device input: $DEV"
-            exit 1
-          fi
-          echo "DEFCONFIG=$DEF" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_USER=Gudzon" >> $GITHUB_ENV
-          echo "KBUILD_BUILD_HOST=github-actions" >> $GITHUB_ENV
-
-      - name: Prepare out dir
-        shell: bash
+      - name: Inject SukiSU-Ultra
         run: |
-          set -euxo pipefail
+          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git sukisu
+          bash sukisu/install.sh
+
+      - name: Inject SUSFS
+        run: |
+          git clone --depth=1 https://github.com/sidex15/susfs4ksu-module.git susfs
+          bash susfs/install.sh
+
+      - name: Configure kernel (STAR)
+        run: |
           mkdir -p out
-          echo "Using DEFCONFIG=$DEFCONFIG"
+          make O=out star_defconfig
 
-      - name: (Optional) Integrate SukiSU-Ultra
-        if: ${{ github.event.inputs.enable_sukisu == 'true' }}
-        shell: bash
+      - name: Build kernel
         run: |
-          set -euxo pipefail
-          rm -rf _sukisu
-          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git _sukisu
+          make -j$(nproc) O=out
 
-          # Попытка авто-интеграции “как есть” (не падаем, если структура другая)
-          # 1) если есть скрипт установки/интеграции — запускаем
-          if [[ -f "_sukisu/setup.sh" ]]; then
-            bash _sukisu/setup.sh || true
-          fi
-          if [[ -f "_sukisu/scripts/setup.sh" ]]; then
-            bash _sukisu/scripts/setup.sh || true
-          fi
-
-          # 2) если есть патчи — пробуем применить
-          # (часто патчи лежат в patches/ или kernel/patches/)
-          shopt -s nullglob
-          for p in _sukisu/patches/*.patch _sukisu/kernel/patches/*.patch; do
-            echo "Applying patch: $p"
-            git apply --whitespace=nowarn "$p" || true
-          done
-          shopt -u nullglob
-
-          echo "SukiSU integration step completed (non-fatal)."
-
-      - name: (Optional) Integrate SUSFS (susfs4ksu-module)
-        if: ${{ github.event.inputs.enable_susfs == 'true' }}
-        shell: bash
+      - name: Pack Image
         run: |
-          set -euxo pipefail
-          rm -rf _susfs
-          git clone --depth=1 https://github.com/sidex15/susfs4ksu-module.git _susfs
+          mkdir artifacts
+          cp out/arch/arm64/boot/Image artifacts/
 
-          # Аналогично: мягкая попытка интеграции.
-          if [[ -f "_susfs/setup.sh" ]]; then
-            bash _susfs/setup.sh || true
-          fi
-          if [[ -f "_susfs/scripts/setup.sh" ]]; then
-            bash _susfs/scripts/setup.sh || true
-          fi
-
-          shopt -s nullglob
-          for p in _susfs/patches/*.patch _susfs/kernel/patches/*.patch; do
-            echo "Applying patch: $p"
-            git apply --whitespace=nowarn "$p" || true
-          done
-          shopt -u nullglob
-
-          echo "SUSFS integration step completed (non-fatal)."
-
-      - name: Configure kernel
-        shell: bash
-        run: |
-          set -euxo pipefail
-          # ВАЖНО: твой прошлый путь vendor/xiaomi/star_defconfig ломал сборку.
-          # Тут используем DEFCONFIG из env.
-          make O=out "$DEFCONFIG"
-
-          # Если хочешь форсить какие-то опции — можно добавить:
-          # scripts/config --file out/.config -e CONFIG_SOMETHING
-          # make O=out olddefconfig
-
-      - name: Build kernel (LLVM/Clang + LLD)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          make -j"${{ github.event.inputs.jobs }}" O=out \
-            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            LLVM=1 LLVM_IAS=1
-
-      - name: Collect artifacts
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p artifacts
-          # Популярные пути для Image:
-          if [[ -f out/arch/arm64/boot/Image ]]; then
-            cp -v out/arch/arm64/boot/Image artifacts/
-          fi
-          if [[ -f out/arch/arm64/boot/Image.gz ]]; then
-            cp -v out/arch/arm64/boot/Image.gz artifacts/
-          fi
-          if [[ -f out/arch/arm64/boot/Image.gz-dtb ]]; then
-            cp -v out/arch/arm64/boot/Image.gz-dtb artifacts/
-          fi
-          if [[ -f out/arch/arm64/boot/Image.lz4-dtb ]]; then
-            cp -v out/arch/arm64/boot/Image.lz4-dtb artifacts/
-          fi
-
-          # На случай, если ничего не нашли:
-          ls -la artifacts || true
-          find out/arch/arm64/boot -maxdepth 1 -type f -name "Image*" -print || true
-
-      - name: Upload artifacts
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ github.event.inputs.device }}-out
-          path: artifacts/*
-          if-no-files-found: error
+          name: STAR-KERNEL-SUKISU-SUSFS
+          path: artifacts/Image
