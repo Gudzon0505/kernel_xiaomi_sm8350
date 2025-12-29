@@ -1,134 +1,50 @@
-Homa, [29.12.2025 0:43]
-name: Build Star Kernel (SukiSU + SUSFS)
+name: Star Kernel Builder (SukiSU + SUSFS)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Install deps
+      - name: Install build deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git curl bc bison flex build-essential \
-            libssl-dev libncurses-dev python3 \
-            lld llvm clang \
-            rsync unzip zip
+          sudo apt update
+          sudo apt install -y git bc bison flex build-essential libssl-dev \
+          libelf-dev dwarves lld llvm clang python3 curl rsync unzip zip
 
-      # Рабочий способ: берем готовый clang из release-assets (иначе curl скачивает HTML и tar падает)
-      - name: Download LLVM/Clang (prebuilt)
+      - name: Download Qualcomm LLVM
         run: |
-          set -e
-          mkdir -p "$HOME/clang"
-          cd "$HOME/clang"
-
-          CLANG_VER="clang-r450784d"
-          URL="https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86/releases/download/${CLANG_VER}/${CLANG_VER}-linux-x86.tar.gz"
-
-          echo "Downloading: $URL"
-          curl -fL -o clang.tar.gz "$URL"
-
-          file clang.tar.gz
+          mkdir -p $HOME/clang
+          cd $HOME/clang
+          curl -L -o clang.tar.gz https://github.com/ClangBuiltLinux/tc-build/releases/download/16.0.6/clang-16.0.6.tar.gz
           tar -xf clang.tar.gz
+          echo "$HOME/clang/clang-16.0.6/bin" >> $GITHUB_PATH
 
-          echo "$HOME/clang/${CLANG_VER}/bin" >> "$GITHUB_PATH"
-          echo "Clang:"
-          "$HOME/clang/${CLANG_VER}/bin/clang" --version
-          echo "LLD:"
-          "$HOME/clang/${CLANG_VER}/bin/ld.lld" --version
-
-      - name: Inject WildKSU
+      - name: Inject SukiSU
         run: |
-          set -e
-          curl -Lss https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
+          curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
-      # В твоём репо НЕТ vendor/xiaomi/star_defconfig, зато есть vendor/star-gki_defconfig (это видно в логе)
-      - name: Detect defconfig (star)
+      - name: Enable SUSFS
         run: |
-          set -e
-          echo "Listing vendor defconfigs:"
-          ls -la arch/arm64/configs/vendor || true
+          DEF=arch/arm64/configs/vendor/star-gki_defconfig
+          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' $DEF || true
+          grep -q CONFIG_SUSFS $DEF || echo "CONFIG_SUSFS=y" >> $DEF
 
-          if [ -f arch/arm64/configs/vendor/star-gki_defconfig ]; then
-            echo "DEFCONFIG=arch/arm64/configs/vendor/star-gki_defconfig" >> $GITHUB_ENV
-          elif [ -f arch/arm64/configs/vendor/star_defconfig ]; then
-            echo "DEFCONFIG=arch/arm64/configs/vendor/star_defconfig" >> $GITHUB_ENV
-          elif [ -f arch/arm64/configs/vendor/mars_defconfig ]; then
-            # fallback если случайно не star
-            echo "DEFCONFIG=arch/arm64/configs/vendor/mars_defconfig" >> $GITHUB_ENV
-          else
-            echo "ERROR: No suitable defconfig found under arch/arm64/configs/vendor/"
-            echo "Available:"
-            find arch/arm64/configs -maxdepth 3 -type f -name "*defconfig" | sed 's|^| - |'
-            exit 1
-          fi
-
-          echo "Using DEFCONFIG=$DEFCONFIG"
-
-      - name: Enable SUSFS in defconfig
+      - name: Build kernel
         run: |
-          set -e
-          echo "Patching: $DEFCONFIG"
-          test -f "$DEFCONFIG"
-
-          # Если строка "CONFIG_SUSFS is not set" — включаем
-          if grep -q "^# CONFIG_SUSFS is not set" "$DEFCONFIG"; then
-            sed -i 's/^# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' "$DEFCONFIG"
-          fi
-
-          # На случай если CONFIG_SUSFS вообще нет — добавим в конец
-          if ! grep -q "^CONFIG_SUSFS=" "$DEFCONFIG"; then
-            echo "CONFIG_SUSFS=y" >> "$DEFCONFIG"
-          fi
-
-          echo "Result:"
-          grep -n "SUSFS" "$DEFCONFIG" || true
-
-      - name: Build kernel (LLVM only)
-        run: |
-          set -e
-
           export ARCH=arm64
-          export SUBARCH=arm64
-
-          # Android kernel обычно собирают так
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-          export READELF=llvm-readelf
-          export HOSTCC=clang
-          export HOSTCXX=clang++
-
-          # Эти флаги часто нужны для GKI/Qualcomm
           export LLVM=1
           export LLVM_IAS=1
+          make O=out vendor/star-gki_defconfig
+          make O=out -j$(nproc)
 
-          make O=out "$DEFCONFIG"
-          make O=out -j"$(nproc)"
-
-          echo "Artifacts check:"
-          ls -la out/arch/arm64/boot || true
-
-Homa, [29.12.2025 0:43]
-- name: Upload Image
+      - name: Upload image
         uses: actions/upload-artifact@v4
         with:
-          name: star-sukisu-susfs-kernel
-          path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/Image.gz
-            out/arch/arm64/boot/dtbo.img
-            out/arch/arm64/boot/dtb.img
-          if-no-files-found: warn
+          name: StarKernel-SukiSU-SUSFS
+          path: out/arch/arm64/boot/Image
