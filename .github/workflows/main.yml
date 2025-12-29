@@ -24,17 +24,19 @@ jobs:
           echo "LLVM_IAS=1" >> $GITHUB_ENV
           echo "ARCH=arm64" >> $GITHUB_ENV
 
-      - name: Inject SukiSU-Ultra
+      # -------- SukiSU ULTRA --------
+      - name: Inject SukiSU Ultra
         run: |
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git sukisu
-          bash sukisu/install.sh
+          bash sukisu/patch_kernel.sh
 
+      # -------- SUSFS --------
       - name: Inject SUSFS
         run: |
           git clone --depth=1 https://github.com/sidex15/susfs4ksu-module.git susfs
-          bash susfs/install.sh
+          bash susfs/patch_kernel.sh
 
-      - name: Configure kernel (STAR)
+      - name: Configure kernel
         run: |
           mkdir -p out
           make O=out star_defconfig
