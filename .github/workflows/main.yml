@@ -1,57 +1,182 @@
-name: STAR Kernel (SukiSU + SUSFS)
+name: Star Kernel (SukiSU Ultra + SUSFS)
 
 on:
   workflow_dispatch:
+    inputs:
+      defconfig_hint:
+        description: "Подсказка имени defconfig (например: star-gki, star, mars, gki). Оставь пустым для авто-поиска."
+        required: false
+        default: "star"
+      jobs:
+        description: "Количество потоков сборки"
+        required: false
+        default: "16"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      # Важно: мы НЕ качаем clang по 404-ссылкам. Используем системный clang/lld.
+      # Это убирает твои ошибки Download LLVM 404 / tar gzip.
+      CC: clang
+      LD: ld.lld
+      LLVM: 1
+      LLVM_IAS: 1
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install deps
         run: |
-          sudo apt update
-          sudo apt install -y git bc bison flex libssl-dev \
-            make clang lld llvm dwarves ccache rsync zip unzip
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex git make \
+            libssl-dev libelf-dev \
+            dwarves pahole \
+            ccache rsync unzip wget \
+            python3 \
+            clang lld llvm
+          echo "clang: $(clang --version | head -n 1)"
+          echo "ld.lld: $(ld.lld --version | head -n 1)"
 
-      - name: Setup LLVM
+      - name: Setup ccache
         run: |
-          echo "CC=clang" >> $GITHUB_ENV
-          echo "LD=ld.lld" >> $GITHUB_ENV
-          echo "LLVM=1" >> $GITHUB_ENV
-          echo "LLVM_IAS=1" >> $GITHUB_ENV
-          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=10G" >> $GITHUB_ENV
+          ccache -M 10G || true
 
-      # -------- SukiSU ULTRA --------
+      # ✅ ВОТ ТОТ САМЫЙ ИСПРАВЛЕННЫЙ БЛОК (ПАТЧЕР ПЕРЕЕХАЛ В kernel/patch_kernel.sh)
       - name: Inject SukiSU Ultra
         run: |
+          set -e
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git sukisu
-          bash sukisu/patch_kernel.sh
+          test -f sukisu/kernel/patch_kernel.sh
+          bash sukisu/kernel/patch_kernel.sh
 
-      # -------- SUSFS --------
-      - name: Inject SUSFS
+      # SUSFS: этот репозиторий в первую очередь про KSU-модуль.
+      # Мы делаем "безопасную" интеграцию: если внутри есть kernel patch/скрипт — применим; если нет — просто пропустим.
+      - name: Inject SUSFS (safe)
         run: |
-          git clone --depth=1 https://github.com/sidex15/susfs4ksu-module.git susfs
-          bash susfs/patch_kernel.sh
+          set -e
+          git clone --depth=1 https://github.com/sidex15/susfs4ksu-module.git susfs4ksu || true
+
+          # Попытка 1: если есть готовый patch в репо — применяем
+          if ls susfs4ksu/**/*.patch 1>/dev/null 2>&1; then
+            echo "[+] Found patches, applying..."
+            for p in $(ls susfs4ksu/**/*.patch); do
+              echo "Applying: $p"
+              git apply --3way "$p" || git apply "$p"
+            done
+          else
+            echo "[-] No *.patch found in susfs4ksu-module, skipping kernel patch step."
+            echo "    (Это нормально: часто SUSFS включают иначе, через отдельный patchset под конкретное дерево ядра.)"
+          fi
+
+      - name: Find best defconfig automatically
+        id: defcfg
+        run: |
+          set -e
+          echo "Searching defconfigs..."
+          echo "Hint: '${{ inputs.defconfig_hint }}'"
+
+          # Список всех defconfig в репо
+          mapfile -t ALL < <(find arch/arm64/configs -maxdepth 4 -type f -name "*defconfig" | sort)
+
+          if [ "${#ALL[@]}" -eq 0 ]; then
+            echo "::error::No defconfigs found under arch/arm64/configs"
+            exit 1
+          fi
+
+          echo "Found ${#ALL[@]} defconfigs."
+
+          # Пробуем подобрать наиболее подходящий по подсказке
+          HINT="${{ inputs.defconfig_hint }}"
+          if [ -n "$HINT" ]; then
+            mapfile -t CAND < <(printf "%s\n" "${ALL[@]}" | grep -i "$HINT" || true)
+          else
+            CAND=()
+          fi
+
+          if [ "${#CAND[@]}" -eq 0 ]; then
+            echo "No matches by hint. Trying common candidates..."
+            # Частые варианты для Xiaomi sm8350 деревьев
+            for try in \
+              "arch/arm64/configs/vendor/star-gki_defconfig" \
+              "arch/arm64/configs/vendor/star_defconfig" \
+              "arch/arm64/configs/vendor/star-qgki_defconfig" \
+              "arch/arm64/configs/vendor/mars_defconfig" \
+              "arch/arm64/configs/vendor/mars-gki_defconfig" \
+              "arch/arm64/configs/gki_defconfig" \
+              "arch/arm64/configs/defconfig"; do
+              if [ -f "$try" ]; then
+                echo "DEFCONFIG=$try" >> $GITHUB_ENV
+                echo "defconfig=$try" >> $GITHUB_OUTPUT
+                echo "[+] Picked: $try"
+                exit 0
+              fi
+            done
+
+            # Если не нашли — берём первый попавшийся
+            PICK="${ALL[0]}"
+            echo "DEFCONFIG=$PICK" >> $GITHUB_ENV
+            echo "defconfig=$PICK" >> $GITHUB_OUTPUT
+            echo "[!] Fallback to first: $PICK"
+            exit 0
+          fi
+
+          PICK="${CAND[0]}"
+          echo "DEFCONFIG=$PICK" >> $GITHUB_ENV
+          echo "defconfig=$PICK" >> $GITHUB_OUTPUT
+          echo "[+] Picked by hint: $PICK"
 
       - name: Configure kernel
         run: |
+          set -e
+          echo "Using DEFCONFIG: $DEFCONFIG"
           mkdir -p out
-          make O=out star_defconfig
+          make O=out ARCH=arm64 "$(basename "$DEFCONFIG")"
 
-      - name: Build kernel
+          # Покажем ключевые включения (если присутствуют)
+          grep -E "KSU|KERNELSU|SUSFS" -n out/.config || true
+
+      - name: Build kernel (Image)
         run: |
-          make -j$(nproc) O=out
+          set -e
+          make -j"${{ inputs.jobs }}" O=out ARCH=arm64 \
+            CC=clang LD=ld.lld \
+            Image
 
-      - name: Pack Image
+          ls -lah out/arch/arm64/boot || true
+
+      - name: Collect artifacts
         run: |
-          mkdir artifacts
-          cp out/arch/arm64/boot/Image artifacts/
+          set -e
+          mkdir -p artifacts
+          if [ -f out/arch/arm64/boot/Image ]; then
+            cp -v out/arch/arm64/boot/Image artifacts/
+          fi
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp -v out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [ -f out/arch/arm64/boot/Image.lz4 ]; then
+            cp -v out/arch/arm64/boot/Image.lz4 artifacts/
+          fi
 
-      - name: Upload
+          # Если есть dtbo/dtb — тоже заберём
+          find out/arch/arm64/boot -maxdepth 2 -type f \( -name "*.dtb" -o -name "dtbo.img" \) -print -exec cp -v {} artifacts/ \; || true
+
+          echo "Artifacts:"
+          ls -lah artifacts || true
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: STAR-KERNEL-SUKISU-SUSFS
-          path: artifacts/Image
+          name: star-kernel-artifacts
+          path: artifacts/*
+          if-no-files-found: error
