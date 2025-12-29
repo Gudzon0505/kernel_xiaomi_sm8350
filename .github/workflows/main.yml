@@ -1,4 +1,4 @@
-name: Build Kernel (SukiSU-Ultra + SUSFS)
+name: Build STAR kernel (SukiSU-Ultra + SUSFS)
 
 on:
   workflow_dispatch:
@@ -6,199 +6,132 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      OUT: out
+
     steps:
-      - name: Checkout
+      - name: Checkout kernel source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
       - name: Install deps
         run: |
+          set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            bc bison flex ccache clang lld llvm \
-            build-essential make ninja-build \
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex build-essential make ninja-build \
             libssl-dev libelf-dev libncurses-dev \
-            python3 python3-pip git wget curl rsync unzip xz-utils \
-            dwarves zstd
+            python3 git curl wget rsync unzip xz-utils \
+            dwarves \
+            clang lld llvm
 
-      # --- LLVM/Clang toolchain (robust) ---
-      # 1) Try Proton-Clang via GitHub API (no hardcoded release URL -> no 404)
-      # 2) Fallback to system clang/lld (already installed above)
-      - name: Setup LLVM (try Proton-Clang, fallback to system clang)
-        id: llvm
+          clang --version | head -n 1
+          ld.lld --version | head -n 1
+
+      # 1) SukiSU-Ultra integration (official approach: kernel/setup.sh builtin)
+      # Source: SukiSU-Ultra integration/installation docs. :contentReference[oaicite:4]{index=4}
+      - name: Integrate SukiSU-Ultra (builtin)
         run: |
-          set -e
-          mkdir -p "$HOME/clang"
-          echo "Trying to download Proton-Clang (latest release asset) ..."
-          API="https://api.github.com/repos/kdrag0n/proton-clang/releases/latest"
-          URL="$(curl -fsSL "$API" | python3 - <<'PY'
-import json,sys
-data=json.load(sys.stdin)
-# pick common linux tarball names
-candidates=[]
-for a in data.get("assets",[]):
-  name=a.get("name","")
-  url=a.get("browser_download_url","")
-  if url and (name.endswith(".tar.zst") or name.endswith(".tar.xz") or name.endswith(".tar.gz")):
-    # Prefer full toolchain tarballs; deprioritize signatures/checksums
-    if any(x in name.lower() for x in ["sha", "sig", "checksum", ".asc"]):
-      continue
-    candidates.append(url)
-print(candidates[0] if candidates else "")
-PY
-)"
-          if [ -n "$URL" ]; then
-            echo "Found asset: $URL"
-            cd "$HOME/clang"
-            curl -fL "$URL" -o toolchain.tar
-            # Detect compression by file magic / try extract in order
-            if tar -tf toolchain.tar >/dev/null 2>&1; then
-              tar -xf toolchain.tar
-            else
-              # try zstd
-              if command -v zstd >/dev/null 2>&1; then
-                (mv toolchain.tar toolchain.tar.zst && tar --use-compress-program=unzstd -xf toolchain.tar.zst) || true
-              fi
-              # try xz/gz fallback attempts
-              ls -la
-            fi
-            # Find clang bin
-            CLANG_BIN="$(find "$HOME/clang" -type f -path "*/bin/clang" | head -n 1 || true)"
-            if [ -n "$CLANG_BIN" ]; then
-              echo "Using Proton-Clang at: $(dirname "$CLANG_BIN")"
-              echo "TOOLCHAIN_BIN=$(dirname "$CLANG_BIN")" >> "$GITHUB_OUTPUT"
-              echo "USE_PROTON=1" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+          set -euxo pipefail
+          # Run from kernel root (this repo). Script patches/integrates into current tree.
+          curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh \
+            | bash -s -- builtin
+
+      # 2) SUSFS: IMPORTANT — susfs4ksu-module does NOT patch kernel.
+      # Need susfs4ksu patchset. :contentReference[oaicite:5]{index=5}
+      - name: Apply SUSFS patchset (best-effort)
+        run: |
+          set -euxo pipefail
+          rm -rf _susfs4ksu
+          # Prefer upstream (GitLab) mirror; GitHub mirror exists too.
+          # We'll try GitHub mirror first (more reliable on Actions), then fallback.
+          if git clone --depth=1 https://github.com/Star-Seven/susfs4ksu.git _susfs4ksu; then
+            echo "Cloned GitHub mirror susfs4ksu"
+          else
+            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git _susfs4ksu
+            echo "Cloned GitLab susfs4ksu"
           fi
 
-          echo "Proton-Clang not available. Falling back to system clang."
-          echo "TOOLCHAIN_BIN=/usr/bin" >> "$GITHUB_OUTPUT"
-          echo "USE_PROTON=0" >> "$GITHUB_OUTPUT"
-
-      - name: Verify clang tools
-        run: |
-          set -e
-          "${{ steps.llvm.outputs.TOOLCHAIN_BIN }}/clang" --version || true
-          "${{ steps.llvm.outputs.TOOLCHAIN_BIN }}/ld.lld" --version || true
-          which clang || true
-          which ld.lld || true
-
-      # --- Inject SukiSU-Ultra correctly ---
-      # Your logs show you tried "sukisu/install.sh" or "sukisu/patch_kernel.sh" (doesn't exist).
-      # Correct is: kernel/setup.sh from SukiSU-Ultra repo. 
-      - name: Inject SukiSU-Ultra (builtin)
-        run: |
-          set -e
-          # "builtin" is the recommended mode in SukiSU-Ultra guide. 
-          curl -fsSL https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh | bash -s -- builtin
-
-      # --- (Optional) SUSFS: enable configs if present ---
-      - name: Configure kernel (auto-detect STAR defconfig)
-        run: |
-          set -e
-          export ARCH=arm64
-          export SUBARCH=arm64
-          OUT=out
-          mkdir -p "$OUT"
-
-          # Try common locations first, then auto-search.
-          CANDIDATES=(
-            "arch/arm64/configs/vendor/xiaomi/star_defconfig"
-            "arch/arm64/configs/vendor/star_defconfig"
-            "arch/arm64/configs/vendor/xiaomi/star-gki_defconfig"
-            "arch/arm64/configs/vendor/star-gki_defconfig"
-            "arch/arm64/configs/star_defconfig"
-            "arch/arm64/configs/star-gki_defconfig"
-          )
-
-          DEF=""
-          for f in "${CANDIDATES[@]}"; do
-            if [ -f "$f" ]; then
-              DEF="$f"
-              break
-            fi
-          done
-
-          if [ -z "$DEF" ]; then
-            # last resort: search
-            DEF="$(find arch/arm64/configs -maxdepth 4 -type f -iname "*star*defconfig*" | head -n 1 || true)"
-          fi
-
-          if [ -z "$DEF" ]; then
-            echo "ERROR: Could not find any STAR defconfig under arch/arm64/configs"
-            echo "Available defconfigs (sample):"
-            find arch/arm64/configs -maxdepth 4 -type f -name "*defconfig" | head -n 50
+          # Apply all patches found (this is best-effort; real world often needs branch matching KMI)
+          # If there are no patches, stop with clear message.
+          shopt -s nullglob
+          patches=( _susfs4ksu/**/*.patch _susfs4ksu/*.patch )
+          if [ ${#patches[@]} -eq 0 ]; then
+            echo "ERROR: No *.patch files found in susfs4ksu repo."
+            echo "This usually means you need to checkout the branch matching your kernel/KMI."
             exit 1
           fi
 
-          echo "Using defconfig: $DEF"
-          make O="$OUT" "$(basename "$DEF")"
+          for p in "${patches[@]}"; do
+            echo "Applying patch: $p"
+            git apply --3way --whitespace=nowarn "$p" || git apply --whitespace=nowarn "$p"
+          done
 
-      - name: Enable SUSFS flags (only if symbols exist)
+      # 3) Auto-detect STAR defconfig (works for GKI and non-GKI trees)
+      - name: Detect STAR defconfig
+        id: defcfg
         run: |
-          set -e
-          OUT=out
-          # scripts/config exists in most kernels; enable only if options are present
-          if [ -x "scripts/config" ]; then
-            # Common SUSFS / KSU symbol guesses; no-fail if not present in this tree
-            for k in \
-              CONFIG_SUSFS \
-              CONFIG_SUSFS_SUS_PATH \
-              CONFIG_SUSFS_SUS_MOUNT \
-              CONFIG_SUSFS_SUS_KSTAT \
-              CONFIG_SUSFS_SUS_MAPS \
-              CONFIG_SUSFS_HIDE_KSU \
-              CONFIG_KSU_SUSFS \
-              CONFIG_KSU_SUSFS_HIDE \
-              CONFIG_KSU_SUSFS_SUS_SU \
-              CONFIG_KSU_SUSFS_SUSFS \
-              CONFIG_KSU_SUSFS_SPOOF_UNAME
-            do
-              if grep -q "^$k" "$OUT/.config" 2>/dev/null || grep -Rqs "config $(echo $k | sed 's/^CONFIG_//')" drivers/Kconfig* Kconfig* 2>/dev/null; then
-                echo "Enabling $k"
-                scripts/config --file "$OUT/.config" -e "$k" || true
-              fi
-            done
+          set -euxo pipefail
+          # Common candidates first
+          CANDS=(
+            "arch/arm64/configs/vendor/star-gki_defconfig"
+            "arch/arm64/configs/vendor/star_defconfig"
+            "arch/arm64/configs/vendor/xiaomi/star_defconfig"
+            "arch/arm64/configs/star_defconfig"
+            "arch/arm64/configs/star-gki_defconfig"
+          )
+          DEF=""
+          for f in "${CANDS[@]}"; do
+            if [ -f "$f" ]; then DEF="$f"; break; fi
+          done
+          if [ -z "$DEF" ]; then
+            DEF="$(find arch/arm64/configs -maxdepth 4 -type f -iname "*star*defconfig*" | head -n 1 || true)"
           fi
-          make O="$OUT" olddefconfig
+          if [ -z "$DEF" ]; then
+            echo "ERROR: STAR defconfig not found under arch/arm64/configs"
+            find arch/arm64/configs -maxdepth 4 -type f -name "*defconfig*" | head -n 80
+            exit 1
+          fi
+          echo "DEFCONFIG_PATH=$DEF" >> "$GITHUB_OUTPUT"
+          echo "Selected: $DEF"
 
-      - name: Build kernel (LLVM/Clang + LLD)
+      - name: Configure
         run: |
-          set -e
-          export ARCH=arm64
-          export SUBARCH=arm64
-          OUT=out
+          set -euxo pipefail
+          mkdir -p "${OUT}"
+          DEF="${{ steps.defcfg.outputs.DEFCONFIG_PATH }}"
+          make O="${OUT}" ARCH=arm64 "${DEF#arch/arm64/configs/}"
+          make O="${OUT}" ARCH=arm64 olddefconfig
 
-          TOOLBIN="${{ steps.llvm.outputs.TOOLCHAIN_BIN }}"
-          export PATH="$TOOLBIN:$PATH"
-
-          # Standard Android/LLVM build flags
-          make -j"$(nproc)" \
-            O="$OUT" \
+      - name: Build (clang + lld)
+        run: |
+          set -euxo pipefail
+          make -j"$(nproc)" O="${OUT}" ARCH=arm64 \
             LLVM=1 LLVM_IAS=1 \
             CC=clang LD=ld.lld
 
       - name: Collect artifacts
         run: |
-          set -e
-          OUT=out
+          set -euxo pipefail
           mkdir -p artifacts
-          # Try common outputs
           for f in \
-            "$OUT/arch/arm64/boot/Image" \
-            "$OUT/arch/arm64/boot/Image.gz" \
-            "$OUT/arch/arm64/boot/Image.gz-dtb" \
-            "$OUT/arch/arm64/boot/dtbo.img" \
-            "$OUT/arch/arm64/boot/dtb.img"
+            "${OUT}/arch/arm64/boot/Image" \
+            "${OUT}/arch/arm64/boot/Image.gz" \
+            "${OUT}/arch/arm64/boot/Image.gz-dtb" \
+            "${OUT}/arch/arm64/boot/dtbo.img"
           do
-            if [ -f "$f" ]; then
-              cp -av "$f" artifacts/
-            fi
+            if [ -f "$f" ]; then cp -av "$f" artifacts/; fi
           done
-          ls -la artifacts || true
+          ls -la artifacts
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-out
-          path: artifacts
+          name: STAR-kernel-SukiSU-SUSFS
+          path: artifacts/*
+          if-no-files-found: error
