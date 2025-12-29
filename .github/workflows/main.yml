@@ -1,4 +1,4 @@
-name: Build Star Kernel (SukiSU + SUSFS)
+name: Build Star GKI Kernel (SukiSU + SUSFS)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install full LLVM toolchain
+      - name: Install toolchain
         run: |
           sudo apt update
           sudo apt install -y \
@@ -22,63 +22,43 @@ jobs:
           which ld.lld
           ld.lld --version
 
-      - name: Locate star defconfig
-        id: def
-        run: |
-          set -e
-          DEF=$(find arch/arm64/configs -type f -name "star_defconfig" | head -n 1 || true)
-          if [ -z "$DEF" ]; then
-            echo "ERROR: star_defconfig not found under arch/arm64/configs"
-            echo "Available defconfigs (sample):"
-            find arch/arm64/configs -type f -name "*defconfig" | head -n 50
-            exit 1
-          fi
-          echo "DEFCONFIG=$DEF" >> $GITHUB_OUTPUT
-          echo "Found defconfig: $DEF"
-
-      - name: Inject WildKSU
+      # =========================
+      # SukiSU
+      # =========================
+      - name: Inject SukiSU
         run: |
           curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
-      - name: Enable SUSFS in defconfig
+      # =========================
+      # SUSFS
+      # =========================
+      - name: Enable SUSFS
         run: |
-          set -e
-          DEF="${{ steps.def.outputs.DEFCONFIG }}"
-          echo "Patching: $DEF"
-
-          # 1) если есть строка "# CONFIG_SUSFS is not set" — заменяем на "CONFIG_SUSFS=y"
+          DEF="arch/arm64/configs/vendor/star-gki_defconfig"
           sed -i 's/^# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' "$DEF" || true
+          grep -q CONFIG_SUSFS "$DEF" || echo "CONFIG_SUSFS=y" >> "$DEF"
+          grep CONFIG_SUSFS "$DEF"
 
-          # 2) если есть "CONFIG_SUSFS=..." — принудительно ставим y
-          if grep -q '^CONFIG_SUSFS=' "$DEF"; then
-            sed -i 's/^CONFIG_SUSFS=.*/CONFIG_SUSFS=y/' "$DEF"
-          else
-            echo 'CONFIG_SUSFS=y' >> "$DEF"
-          fi
-
-          echo "Result:"
-          grep -n "CONFIG_SUSFS" "$DEF" || true
-
-      - name: Build kernel (LLVM only)
+      # =========================
+      # Build
+      # =========================
+      - name: Build kernel
         run: |
-          set -e
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
-          export HOSTCC=clang
           export LD=ld.lld
           export LLVM=1
           export LLVM_IAS=1
 
-          DEF="${{ steps.def.outputs.DEFCONFIG }}"
-          # make принимает путь к defconfig как таргет: vendor/xiaomi/star_defconfig или vendor/star_defconfig и т.д.
-          # поэтому получаем "краткий" таргет относительно arch/arm64/configs/
-          TARGET="${DEF#arch/arm64/configs/}"
-          make "$TARGET"
-          make -j"$(nproc)"
+          make vendor/star-gki_defconfig
+          make -j$(nproc)
 
+      # =========================
+      # Upload
+      # =========================
       - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
-          name: star-sukisu-kernel
+          name: star-sukisu-gki-kernel
           path: arch/arm64/boot/Image
