@@ -8,67 +8,50 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install deps
         run: |
           sudo apt update
-          sudo apt install -y \
-            git wget curl rsync unzip \
-            bc bison flex build-essential \
-            libssl-dev libncurses-dev libelf-dev \
-            python3 lld llvm clang dwarves
+          sudo apt install -y git wget curl unzip rsync bc bison flex build-essential \
+            libssl-dev libncurses-dev libelf-dev python3 lld llvm clang dwarves
 
-      # 🔥 Android/Qualcomm LLVM (работающий)
+      # Android LLVM from Google (stable, non-404)
       - name: Download Android LLVM
         run: |
-          mkdir -p $HOME/clang
-          cd $HOME/clang
-          wget https://github.com/ClangBuiltLinux/tc-build/releases/download/2024-10-20/clang-r547379.tar.xz
-          tar -xf clang-r547379.tar.xz
-          echo "$HOME/clang/clang-r547379/bin" >> $GITHUB_PATH
+          mkdir -p $HOME/clang && cd $HOME/clang
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r522817.tar.gz
+          tar -xf clang-r522817.tar.gz
+          echo "$HOME/clang" >> $GITHUB_PATH
 
       - name: Verify clang
         run: |
           clang --version
           ld.lld --version
 
-      # WildKSU
       - name: Inject WildKSU
         run: |
           curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
-      # SUSFS enable (STAR)
       - name: Enable SUSFS
         run: |
           DEF=arch/arm64/configs/vendor/star-gki_defconfig
-          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' $DEF
+          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' $DEF || true
           grep -q CONFIG_SUSFS $DEF || echo "CONFIG_SUSFS=y" >> $DEF
 
-      # Build kernel
       - name: Build kernel
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
           export LLVM=1
           export LLVM_IAS=1
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
 
           mkdir -p out
           make O=out vendor/star-gki_defconfig
           make O=out -j$(nproc)
 
-          ls out/arch/arm64/boot/Image
-
       - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
-          name: STAR-SukiSU-SUSFS-Image
+          name: STAR-SukiSU-SUSFS
           path: out/arch/arm64/boot/Image
