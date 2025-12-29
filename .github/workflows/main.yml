@@ -8,103 +8,46 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install deps
+      # Устанавливаем полный LLVM toolchain
+      - name: Install full LLVM toolchain
         run: |
           sudo apt update
           sudo apt install -y \
+            clang lld llvm \
             git curl bc bison flex build-essential \
-            libssl-dev libncurses-dev python3 \
-            ca-certificates unzip rsync file \
-            dwarves
+            libssl-dev libncurses-dev python3 dwarves rsync unzip file
 
-      # 1) Ставим Clang/LLVM (важно: именно чтобы host-tools тоже собирались clang'ом)
-      - name: Setup LLVM/Clang toolchain
-        run: |
-          mkdir -p $HOME/clang
-          cd $HOME/clang
-          # Stable prebuilt LLVM for Linux x86_64 (AOSP style). Работает надежно для Qualcomm kernels.
-          curl -L -o clang.tar.gz https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          tar -xf clang.tar.gz --strip-components=1
-          echo "$HOME/clang/bin" >> $GITHUB_PATH
-          clang --version
+          which clang
+          which ld.lld
           ld.lld --version
 
-      # 2) Инжект WildKSU
       - name: Inject WildKSU
         run: |
           curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
-      # 3) Включаем SUSFS в defconfig (и не падаем если файл другой)
       - name: Enable SUSFS
         run: |
-          set -e
-          DEF1="arch/arm64/configs/vendor/xiaomi/star_defconfig"
-          DEF2="arch/arm64/configs/vendor/star_defconfig"
-          DEF3="arch/arm64/configs/gki_defconfig"
-
-          if [ -f "$DEF1" ]; then
-            DEF="$DEF1"
-          elif [ -f "$DEF2" ]; then
-            DEF="$DEF2"
-          elif [ -f "$DEF3" ]; then
-            DEF="$DEF3"
-          else
-            echo "ERROR: defconfig not found (checked: $DEF1, $DEF2, $DEF3)"
-            ls -la arch/arm64/configs || true
-            ls -la arch/arm64/configs/vendor || true
-            ls -la arch/arm64/configs/vendor/xiaomi || true
-            exit 1
-          fi
-
-          echo "Using defconfig: $DEF"
-          # включаем CONFIG_SUSFS=y если строка присутствует как '# CONFIG_SUSFS is not set'
+          DEF="arch/arm64/configs/vendor/xiaomi/star_defconfig"
           sed -i 's/^# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' "$DEF" || true
-          # если строки вообще нет — добавим в конец
           grep -q '^CONFIG_SUSFS=' "$DEF" || echo 'CONFIG_SUSFS=y' >> "$DEF"
-          tail -n 30 "$DEF"
 
-      # 4) Сборка ядра — ПОЛНЫЙ FIX от твоей ошибки:
-      #    принудительно LLVM/Clang и для host-tools (HOSTCC=clang, LLVM=1, LLVM_IAS=1)
-      - name: Build kernel (LLVM/Clang)
+      - name: Build kernel (LLVM only)
         run: |
-          set -e
           export ARCH=arm64
           export SUBARCH=arm64
-
           export CC=clang
           export HOSTCC=clang
           export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
           export LLVM=1
           export LLVM_IAS=1
 
-          # Если у тебя реально нужен vendor/xiaomi/star_defconfig — оставь так.
-          # Если не существует, fallback на gki_defconfig.
-          if [ -f arch/arm64/configs/vendor/xiaomi/star_defconfig ]; then
-            make vendor/xiaomi/star_defconfig
-          elif [ -f arch/arm64/configs/vendor/star_defconfig ]; then
-            make vendor/star_defconfig
-          else
-            make gki_defconfig
-          fi
+          make vendor/xiaomi/star_defconfig
+          make -j$(nproc)
 
-          make -j"$(nproc)"
-
-      # 5) Upload артефактов (Image)
       - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
           name: star-sukisu-kernel
-          path: |
-            arch/arm64/boot/Image
-            arch/arm64/boot/Image.gz
-            arch/arm64/boot/Image.lz4
-            arch/arm64/boot/dts/*.dtb
-            arch/arm64/boot/dts/qcom/*.dtb
+          path: arch/arm64/boot/Image
