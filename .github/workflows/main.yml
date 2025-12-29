@@ -10,7 +10,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Устанавливаем полный LLVM toolchain
       - name: Install full LLVM toolchain
         run: |
           sudo apt update
@@ -23,18 +22,46 @@ jobs:
           which ld.lld
           ld.lld --version
 
+      - name: Locate star defconfig
+        id: def
+        run: |
+          set -e
+          DEF=$(find arch/arm64/configs -type f -name "star_defconfig" | head -n 1 || true)
+          if [ -z "$DEF" ]; then
+            echo "ERROR: star_defconfig not found under arch/arm64/configs"
+            echo "Available defconfigs (sample):"
+            find arch/arm64/configs -type f -name "*defconfig" | head -n 50
+            exit 1
+          fi
+          echo "DEFCONFIG=$DEF" >> $GITHUB_OUTPUT
+          echo "Found defconfig: $DEF"
+
       - name: Inject WildKSU
         run: |
           curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
-      - name: Enable SUSFS
+      - name: Enable SUSFS in defconfig
         run: |
-          DEF="arch/arm64/configs/vendor/xiaomi/star_defconfig"
+          set -e
+          DEF="${{ steps.def.outputs.DEFCONFIG }}"
+          echo "Patching: $DEF"
+
+          # 1) если есть строка "# CONFIG_SUSFS is not set" — заменяем на "CONFIG_SUSFS=y"
           sed -i 's/^# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' "$DEF" || true
-          grep -q '^CONFIG_SUSFS=' "$DEF" || echo 'CONFIG_SUSFS=y' >> "$DEF"
+
+          # 2) если есть "CONFIG_SUSFS=..." — принудительно ставим y
+          if grep -q '^CONFIG_SUSFS=' "$DEF"; then
+            sed -i 's/^CONFIG_SUSFS=.*/CONFIG_SUSFS=y/' "$DEF"
+          else
+            echo 'CONFIG_SUSFS=y' >> "$DEF"
+          fi
+
+          echo "Result:"
+          grep -n "CONFIG_SUSFS" "$DEF" || true
 
       - name: Build kernel (LLVM only)
         run: |
+          set -e
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
@@ -43,8 +70,12 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
 
-          make vendor/xiaomi/star_defconfig
-          make -j$(nproc)
+          DEF="${{ steps.def.outputs.DEFCONFIG }}"
+          # make принимает путь к defconfig как таргет: vendor/xiaomi/star_defconfig или vendor/star_defconfig и т.д.
+          # поэтому получаем "краткий" таргет относительно arch/arm64/configs/
+          TARGET="${DEF#arch/arm64/configs/}"
+          make "$TARGET"
+          make -j"$(nproc)"
 
       - name: Upload Image
         uses: actions/upload-artifact@v4
