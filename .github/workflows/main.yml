@@ -1,4 +1,4 @@
-name: Build Star GKI Kernel (SukiSU + SUSFS)
+name: Build Xiaomi STAR HyperOS GKI (SukiSU + SUSFS)
 
 on:
   workflow_dispatch:
@@ -10,55 +10,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install toolchain
+      - name: Install build deps
         run: |
           sudo apt update
           sudo apt install -y \
             clang lld llvm \
             git curl bc bison flex build-essential \
-            libssl-dev libncurses-dev python3 dwarves rsync unzip file
+            libssl-dev libncurses-dev python3 \
+            dwarves rsync unzip file cpio
 
-          which clang
-          which ld.lld
-          ld.lld --version
-
-      # =========================
-      # SukiSU
-      # =========================
+      # =====================
+      # Inject SukiSU
+      # =====================
       - name: Inject SukiSU
         run: |
           curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
-      # =========================
-      # SUSFS
-      # =========================
+      # =====================
+      # Enable SUSFS
+      # =====================
       - name: Enable SUSFS
         run: |
-          DEF="arch/arm64/configs/vendor/star-gki_defconfig"
-          sed -i 's/^# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' "$DEF" || true
-          grep -q CONFIG_SUSFS "$DEF" || echo "CONFIG_SUSFS=y" >> "$DEF"
-          grep CONFIG_SUSFS "$DEF"
+          DEF=arch/arm64/configs/vendor/star-gki_defconfig
+          sed -i 's/^# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' $DEF || true
+          grep -q CONFIG_SUSFS $DEF || echo "CONFIG_SUSFS=y" >> $DEF
 
-      # =========================
-      # Build
-      # =========================
+      # =====================
+      # Build kernel
+      # =====================
       - name: Build kernel
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
           export LD=ld.lld
+          export HOSTCC=gcc
           export LLVM=1
           export LLVM_IAS=1
+          export CLANG_TRIPLE=aarch64-linux-gnu-
 
           make vendor/star-gki_defconfig
           make -j$(nproc)
 
-      # =========================
-      # Upload
-      # =========================
+      # =====================
+      # Upload Image
+      # =====================
       - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
-          name: star-sukisu-gki-kernel
+          name: star-gki-sukisu-susfs
           path: arch/arm64/boot/Image
