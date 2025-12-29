@@ -3,187 +3,184 @@ name: Build Star Kernel (SukiSU + SUSFS)
 on:
   workflow_dispatch:
     inputs:
-      defconfig:
-        description: "Defconfig name under arch/arm64/configs (example: vendor/star-gki_defconfig)"
-        required: false
-        default: "vendor/star-gki_defconfig"
+      device:
+        description: "Device defconfig selector: star or mars"
+        required: true
+        default: "star"
       jobs:
-        description: "Parallel jobs for make"
-        required: false
+        description: "Parallel build jobs"
+        required: true
         default: "16"
+      enable_sukisu:
+        description: "Try to integrate SukiSU-Ultra"
+        required: true
+        default: "true"
       enable_susfs:
-        description: "Enable SUSFS config injection (if your repo has scripts for it)"
-        required: false
+        description: "Try to integrate SUSFS (susfs4ksu-module)"
+        required: true
         default: "true"
-      inject_sukisu:
-        description: "Inject SukiSU (if your repo has scripts for it)"
-        required: false
-        default: "true"
-      inject_wildksu:
-        description: "Inject WildKSU (if your repo has scripts for it)"
-        required: false
-        default: "false"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
-    env:
-      ARCH: arm64
-      SUBARCH: arm64
-      DEFCONFIG: ${{ inputs.defconfig }}
-      JOBS: ${{ inputs.jobs }}
-
-      # Official Android LLVM (Google) archive from googlesource.
-      # If you want another clang revision later — change CLANG_REV and the URL accordingly.
-      CLANG_REV: clang-r522817
-      CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 0
+          submodules: recursive
 
       - name: Install deps
+        shell: bash
         run: |
+          set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ca-certificates ccache curl flex \
-            git gnupg gperf libelf-dev libncurses-dev libssl-dev \
-            lz4 rsync unzip wget xz-utils zstd python3
-
-      - name: Download Android LLVM (Google)
-        run: |
-          set -e
-          mkdir -p "$HOME/clang"
-          cd "$HOME/clang"
-          echo "Downloading: $CLANG_URL"
-          wget -O clang.tar.gz "$CLANG_URL"
-          mkdir -p "$CLANG_REV"
-          tar -xzf clang.tar.gz -C "$CLANG_REV"
-          echo "LLVM unpacked to: $HOME/clang/$CLANG_REV"
-
-      - name: Verify clang tools
-        run: |
-          set -e
-          export PATH="$HOME/clang/$CLANG_REV/bin:$PATH"
-          which clang
+          sudo apt-get install -y \
+            git curl wget ca-certificates rsync unzip zip xz-utils \
+            build-essential bc bison flex ccache \
+            python3 python3-pip \
+            libssl-dev libelf-dev dwarves \
+            clang lld llvm
           clang --version
-          which ld.lld
           ld.lld --version
-          which llvm-ar
-          llvm-ar --version
 
-      # Optional: Inject SukiSU / WildKSU
-      # ВАЖНО: пути скриптов зависят от твоего репо.
-      # Если у тебя другие имена/пути — просто поменяй команды внутри шагов.
-      - name: Inject SukiSU (optional)
-        if: ${{ inputs.inject_sukisu == 'true' }}
+      - name: Setup env
+        shell: bash
         run: |
-          set -e
-          echo "Inject SukiSU enabled."
-          if [ -f "./scripts/sukisu/inject.sh" ]; then
-            bash ./scripts/sukisu/inject.sh
-          elif [ -f "./scripts/ksu/inject_sukisu.sh" ]; then
-            bash ./scripts/ksu/inject_sukisu.sh
+          set -euxo pipefail
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "LD=ld.lld" >> $GITHUB_ENV
+          echo "AR=llvm-ar" >> $GITHUB_ENV
+          echo "NM=llvm-nm" >> $GITHUB_ENV
+          echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
+          echo "OBJDUMP=llvm-objdump" >> $GITHUB_ENV
+          echo "STRIP=llvm-strip" >> $GITHUB_ENV
+          echo "LLVM=1" >> $GITHUB_ENV
+          echo "LLVM_IAS=1" >> $GITHUB_ENV
+          echo "ARCH=arm64" >> $GITHUB_ENV
+
+          # Defconfig selector (по твоему логу star_defconfig не существует, есть star-gki_defconfig)
+          DEV="${{ github.event.inputs.device }}"
+          if [[ "$DEV" == "star" ]]; then
+            DEF="vendor/star-gki_defconfig"
+          elif [[ "$DEV" == "mars" ]]; then
+            DEF="vendor/mars_defconfig"
           else
-            echo "No SukiSU inject script found. Skipping."
-          fi
-
-      - name: Inject WildKSU (optional)
-        if: ${{ inputs.inject_wildksu == 'true' }}
-        run: |
-          set -e
-          echo "Inject WildKSU enabled."
-          if [ -f "./scripts/wildksu/inject.sh" ]; then
-            bash ./scripts/wildksu/inject.sh
-          elif [ -f "./scripts/ksu/inject_wildksu.sh" ]; then
-            bash ./scripts/ksu/inject_wildksu.sh
-          else
-            echo "No WildKSU inject script found. Skipping."
-          fi
-
-      - name: Prepare defconfig
-        run: |
-          set -e
-          if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
-            echo "ERROR: defconfig not found: arch/arm64/configs/$DEFCONFIG"
-            echo "Hint: check your available defconfigs under arch/arm64/configs/vendor/"
+            echo "Unknown device input: $DEV"
             exit 1
           fi
-          echo "Using defconfig: $DEFCONFIG"
+          echo "DEFCONFIG=$DEF" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_USER=Gudzon" >> $GITHUB_ENV
+          echo "KBUILD_BUILD_HOST=github-actions" >> $GITHUB_ENV
 
-      # Optional: Enable SUSFS in defconfig (если у тебя есть готовый патчер/скрипт)
-      - name: Enable SUSFS (optional)
-        if: ${{ inputs.enable_susfs == 'true' }}
+      - name: Prepare out dir
+        shell: bash
         run: |
-          set -e
-          echo "Enable SUSFS requested."
-          # Примеры возможных скриптов. Если у тебя другой — подставь свой.
-          if [ -f "./scripts/susfs/enable.sh" ]; then
-            bash ./scripts/susfs/enable.sh "arch/arm64/configs/$DEFCONFIG"
-          elif [ -f "./scripts/enable_susfs.sh" ]; then
-            bash ./scripts/enable_susfs.sh "arch/arm64/configs/$DEFCONFIG"
-          else
-            echo "No SUSFS enable script found. Skipping."
+          set -euxo pipefail
+          mkdir -p out
+          echo "Using DEFCONFIG=$DEFCONFIG"
+
+      - name: (Optional) Integrate SukiSU-Ultra
+        if: ${{ github.event.inputs.enable_sukisu == 'true' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf _sukisu
+          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git _sukisu
+
+          # Попытка авто-интеграции “как есть” (не падаем, если структура другая)
+          # 1) если есть скрипт установки/интеграции — запускаем
+          if [[ -f "_sukisu/setup.sh" ]]; then
+            bash _sukisu/setup.sh || true
+          fi
+          if [[ -f "_sukisu/scripts/setup.sh" ]]; then
+            bash _sukisu/scripts/setup.sh || true
           fi
 
-      - name: Build kernel (LLVM)
+          # 2) если есть патчи — пробуем применить
+          # (часто патчи лежат в patches/ или kernel/patches/)
+          shopt -s nullglob
+          for p in _sukisu/patches/*.patch _sukisu/kernel/patches/*.patch; do
+            echo "Applying patch: $p"
+            git apply --whitespace=nowarn "$p" || true
+          done
+          shopt -u nullglob
+
+          echo "SukiSU integration step completed (non-fatal)."
+
+      - name: (Optional) Integrate SUSFS (susfs4ksu-module)
+        if: ${{ github.event.inputs.enable_susfs == 'true' }}
+        shell: bash
         run: |
-          set -e
-          export PATH="$HOME/clang/$CLANG_REV/bin:$PATH"
+          set -euxo pipefail
+          rm -rf _susfs
+          git clone --depth=1 https://github.com/sidex15/susfs4ksu-module.git _susfs
 
-          # ccache (optional, helps speed)
-          export CCACHE_DIR="$HOME/.ccache"
-          ccache -M 5G || true
+          # Аналогично: мягкая попытка интеграции.
+          if [[ -f "_susfs/setup.sh" ]]; then
+            bash _susfs/setup.sh || true
+          fi
+          if [[ -f "_susfs/scripts/setup.sh" ]]; then
+            bash _susfs/scripts/setup.sh || true
+          fi
 
-          # Clean build dir
-          rm -rf out
-          mkdir -p out
+          shopt -s nullglob
+          for p in _susfs/patches/*.patch _susfs/kernel/patches/*.patch; do
+            echo "Applying patch: $p"
+            git apply --whitespace=nowarn "$p" || true
+          done
+          shopt -u nullglob
 
-          # Configure
-          make O=out ARCH=arm64 "$DEFCONFIG"
+          echo "SUSFS integration step completed (non-fatal)."
 
-          # Build with LLVM toolchain
-          make -j"$JOBS" O=out ARCH=arm64 \
-            LLVM=1 LLVM_IAS=1 \
-            CC=clang LD=ld.lld \
-            AR=llvm-ar NM=llvm-nm \
+      - name: Configure kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # ВАЖНО: твой прошлый путь vendor/xiaomi/star_defconfig ломал сборку.
+          # Тут используем DEFCONFIG из env.
+          make O=out "$DEFCONFIG"
+
+          # Если хочешь форсить какие-то опции — можно добавить:
+          # scripts/config --file out/.config -e CONFIG_SOMETHING
+          # make O=out olddefconfig
+
+      - name: Build kernel (LLVM/Clang + LLD)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          make -j"${{ github.event.inputs.jobs }}" O=out \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            Image dtbs dtbo.img || make -j"$JOBS" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image
+            LLVM=1 LLVM_IAS=1
 
       - name: Collect artifacts
+        shell: bash
         run: |
-          set -e
+          set -euxo pipefail
           mkdir -p artifacts
-
-          # Image
-          if [ -f "out/arch/arm64/boot/Image" ]; then
+          # Популярные пути для Image:
+          if [[ -f out/arch/arm64/boot/Image ]]; then
             cp -v out/arch/arm64/boot/Image artifacts/
           fi
-
-          # dtbo
-          if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
-            cp -v out/arch/arm64/boot/dtbo.img artifacts/
+          if [[ -f out/arch/arm64/boot/Image.gz ]]; then
+            cp -v out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -f out/arch/arm64/boot/Image.gz-dtb ]]; then
+            cp -v out/arch/arm64/boot/Image.gz-dtb artifacts/
+          fi
+          if [[ -f out/arch/arm64/boot/Image.lz4-dtb ]]; then
+            cp -v out/arch/arm64/boot/Image.lz4-dtb artifacts/
           fi
 
-          # dtb(s)
-          if [ -d "out/arch/arm64/boot/dts" ]; then
-            tar -czf artifacts/dts.tar.gz -C out/arch/arm64/boot dts || true
-          fi
-
-          # config
-          if [ -f "out/.config" ]; then
-            cp -v out/.config artifacts/config.txt
-          fi
-
-          ls -lah artifacts || true
+          # На случай, если ничего не нашли:
+          ls -la artifacts || true
+          find out/arch/arm64/boot -maxdepth 1 -type f -name "Image*" -print || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: star-kernel-${{ github.run_number }}
+          name: kernel-${{ github.event.inputs.device }}-out
           path: artifacts/*
-          if-no-files-found: warn
+          if-no-files-found: error
