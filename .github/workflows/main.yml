@@ -1,4 +1,4 @@
-name: Build Star Kernel (SukiSU + SUSFS)
+name: Build STAR Kernel (SukiSU + SUSFS)
 
 on:
   workflow_dispatch:
@@ -13,67 +13,44 @@ jobs:
 
       - name: Install deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt update
+          sudo apt install -y \
             git wget curl rsync unzip \
             bc bison flex build-essential \
             libssl-dev libncurses-dev libelf-dev \
-            python3 python3-pip \
-            lld llvm clang \
-            dwarves
+            python3 lld llvm clang dwarves
 
-      # ✅ WORKING clang from ClangBuiltLinux (no 404)
-      - name: Download Android LLVM (ClangBuiltLinux)
+      # 🔥 Android/Qualcomm LLVM (работающий)
+      - name: Download Android LLVM
         run: |
-          set -e
-          mkdir -p "$HOME/clang"
-          cd "$HOME/clang"
-          wget -O clang.tar.xz https://github.com/ClangBuiltLinux/tc-build/releases/download/2024-10-20/clang-r547379.tar.xz
-          tar -xf clang.tar.xz
-          echo "$HOME/clang/clang-r547379/bin" >> "$GITHUB_PATH"
+          mkdir -p $HOME/clang
+          cd $HOME/clang
+          wget https://github.com/ClangBuiltLinux/tc-build/releases/download/2024-10-20/clang-r547379.tar.xz
+          tar -xf clang-r547379.tar.xz
+          echo "$HOME/clang/clang-r547379/bin" >> $GITHUB_PATH
 
-      - name: Verify clang tools
+      - name: Verify clang
         run: |
-          set -e
-          which clang
           clang --version
-          which ld.lld
           ld.lld --version
 
-      # ✅ WildKSU inject (как у тебя было)
+      # WildKSU
       - name: Inject WildKSU
         run: |
-          set -e
           curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
-      # ✅ SUSFS включаем в ПРАВИЛЬНЫЙ defconfig
-      # В логах у тебя есть: arch/arm64/configs/vendor/star-gki_defconfig
-      - name: Enable SUSFS in defconfig (STAR)
+      # SUSFS enable (STAR)
+      - name: Enable SUSFS
         run: |
-          set -e
-          DEF="arch/arm64/configs/vendor/star-gki_defconfig"
-          test -f "$DEF"
-          # включаем если закомментировано / выключено
-          sed -i \
-            -e 's/^# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' \
-            -e 's/^CONFIG_SUSFS=m/CONFIG_SUSFS=y/' \
-            -e 's/^CONFIG_SUSFS=n/CONFIG_SUSFS=y/' \
-            "$DEF"
-          # если строки не было — добавим
-          grep -q '^CONFIG_SUSFS=' "$DEF" || echo 'CONFIG_SUSFS=y' >> "$DEF"
-          tail -n 5 "$DEF"
-          grep -n "CONFIG_SUSFS" "$DEF" || true
+          DEF=arch/arm64/configs/vendor/star-gki_defconfig
+          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' $DEF
+          grep -q CONFIG_SUSFS $DEF || echo "CONFIG_SUSFS=y" >> $DEF
 
-      - name: Build kernel (LLVM)
+      # Build kernel
+      - name: Build kernel
         run: |
-          set -e
           export ARCH=arm64
           export SUBARCH=arm64
-
-          # сборка в out/
-          mkdir -p out
-
-          # LLVM build
           export LLVM=1
           export LLVM_IAS=1
           export CC=clang
@@ -84,18 +61,14 @@ jobs:
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
 
-          # defconfig для STAR (Mi 11 Ultra)
+          mkdir -p out
           make O=out vendor/star-gki_defconfig
+          make O=out -j$(nproc)
 
-          # сборка
-          make O=out -j"$(nproc)"
-
-          # проверка что Image реально появился
-          ls -lah out/arch/arm64/boot/Image
+          ls out/arch/arm64/boot/Image
 
       - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
-          name: star-sukisu-susfs-kernel-Image
+          name: STAR-SukiSU-SUSFS-Image
           path: out/arch/arm64/boot/Image
-```0
