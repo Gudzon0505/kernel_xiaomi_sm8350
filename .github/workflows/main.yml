@@ -10,41 +10,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build deps
+      - name: Install deps
         run: |
           sudo apt update
-          sudo apt install -y \
-            clang lld llvm \
-            git curl bc bison flex build-essential \
-            libssl-dev libncurses-dev python3 \
-            dwarves rsync unzip file cpio
+          sudo apt install -y git curl bc bison flex build-essential \
+            libssl-dev libncurses-dev python3 dwarves rsync unzip file cpio
 
-      # =====================
+      # =========================
+      # Qualcomm LLVM Toolchain
+      # =========================
+      - name: Download Qualcomm LLVM
+        run: |
+          mkdir -p $HOME/clang
+          cd $HOME/clang
+          curl -LO https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86_clang-r450784d/archive/refs/heads/14.0.tar.gz
+          tar -xf 14.0.tar.gz
+          echo "$HOME/clang/android_prebuilts_clang_host_linux-x86_clang-r450784d-14.0/bin" >> $GITHUB_PATH
+
+      # =========================
       # Inject SukiSU
-      # =====================
+      # =========================
       - name: Inject SukiSU
         run: |
           curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
-      # =====================
+      # =========================
       # Enable SUSFS
-      # =====================
+      # =========================
       - name: Enable SUSFS
         run: |
           DEF=arch/arm64/configs/vendor/star-gki_defconfig
           sed -i 's/^# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' $DEF || true
           grep -q CONFIG_SUSFS $DEF || echo "CONFIG_SUSFS=y" >> $DEF
 
-      # =====================
+      # =========================
       # Build kernel
-      # =====================
+      # =========================
       - name: Build kernel
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
           export CC=clang
           export LD=ld.lld
-          export HOSTCC=gcc
+          export HOSTCC=clang
           export LLVM=1
           export LLVM_IAS=1
           export CLANG_TRIPLE=aarch64-linux-gnu-
@@ -52,9 +60,9 @@ jobs:
           make vendor/star-gki_defconfig
           make -j$(nproc)
 
-      # =====================
+      # =========================
       # Upload Image
-      # =====================
+      # =========================
       - name: Upload Image
         uses: actions/upload-artifact@v4
         with:
