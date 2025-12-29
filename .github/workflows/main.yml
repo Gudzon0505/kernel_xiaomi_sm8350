@@ -1,0 +1,39 @@
+name: Build Star Kernel (SukiSU + SUSFS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install deps
+      run: |
+        sudo apt update
+        sudo apt install -y git curl bc bison flex build-essential libssl-dev libncurses-dev python3
+
+    - name: Inject WildKSU
+      run: |
+        curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
+
+    - name: Enable SUSFS
+      run: |
+        sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' arch/arm64/configs/vendor/star_defconfig
+
+    - name: Build kernel
+      run: |
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export KBUILD_BUILD_USER=Gudzon
+        export KBUILD_BUILD_HOST=star
+        make vendor/star_defconfig
+        make -j$(nproc)
+
+    - name: Upload Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: star-sukisu-kernel
+        path: arch/arm64/boot/Image
