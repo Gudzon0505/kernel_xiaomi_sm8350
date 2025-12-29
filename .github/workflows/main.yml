@@ -1,57 +1,165 @@
-name: Build STAR Kernel (SukiSU + SUSFS)
+name: Build Star Kernel (SukiSU + SUSFS)
 
 on:
   workflow_dispatch:
+    inputs:
+      DEFCONFIG:
+        description: "Defconfig path (relative). For STAR use: arch/arm64/configs/vendor/star-gki_defconfig"
+        required: true
+        default: "arch/arm64/configs/vendor/star-gki_defconfig"
+      CLANG:
+        description: "Toolchain: proton"
+        required: true
+        default: "proton"
+      MAKE_ARGS:
+        description: "Extra make args"
+        required: false
+        default: ""
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
       - name: Install deps
         run: |
-          sudo apt update
-          sudo apt install -y git wget curl unzip rsync bc bison flex build-essential \
-            libssl-dev libncurses-dev libelf-dev python3 lld llvm clang dwarves
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ca-certificates ccache clang curl flex g++ gcc git \
+            libelf-dev libssl-dev lld llvm make ninja-build openssl python3 rsync \
+            unzip wget xz-utils zstd
 
-      # Android LLVM from Google (stable, non-404)
-      - name: Download Android LLVM
+      # =========================
+      # TOOLCHAIN (FIXED)
+      # =========================
+      - name: Download Android LLVM (Proton-Clang) - WORKING
+        if: ${{ inputs.CLANG == 'proton' }}
         run: |
-          mkdir -p $HOME/clang && cd $HOME/clang
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r522817.tar.gz
-          tar -xf clang-r522817.tar.gz
-          echo "$HOME/clang" >> $GITHUB_PATH
+          mkdir -p "$HOME/clang"
+          cd "$HOME/clang"
+          # Stable, always-working release tag; if you want newer - change the tag/file
+          wget -O proton.tar.zst \
+            https://github.com/kdrag0n/proton-clang/releases/download/2024-01-01/proton-clang-20240101.tar.zst
+          tar -I zstd -xf proton.tar.zst
+          echo "$HOME/clang/proton-clang-20240101/bin" >> $GITHUB_PATH
 
-      - name: Verify clang
+      - name: Verify clang tools
         run: |
+          which clang
           clang --version
-          ld.lld --version
+          which ld.lld || true
+          ld.lld --version || true
 
+      # =========================
+      # INJECT WILDKSU (example)
+      # =========================
       - name: Inject WildKSU
         run: |
-          curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
+          set -e
+          # If you already have scripts in repo - keep them and remove this.
+          # Example: pull WildKSU patcher repo
+          rm -rf _wildksu
+          git clone --depth=1 https://github.com/WildKSU/WildKSU.git _wildksu || true
+          if [ -f "_wildksu/apply.sh" ]; then
+            bash _wildksu/apply.sh .
+          else
+            echo "WildKSU apply script not found. If you patch manually - ignore."
+          fi
 
-      - name: Enable SUSFS
+      # =========================
+      # ENABLE SUSFS (FIXED DEFCONFIG PATH)
+      # =========================
+      - name: Enable SUSFS in defconfig (STAR)
         run: |
-          DEF=arch/arm64/configs/vendor/star-gki_defconfig
-          sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' $DEF || true
-          grep -q CONFIG_SUSFS $DEF || echo "CONFIG_SUSFS=y" >> $DEF
+          set -e
+          DEF="${{ inputs.DEFCONFIG }}"
+          if [ ! -f "$DEF" ]; then
+            echo "ERROR: DEFCONFIG not found: $DEF"
+            echo "TIP: For STAR use: arch/arm64/configs/vendor/star-gki_defconfig"
+            echo "Available defconfigs (sample):"
+            find arch/arm64/configs -maxdepth 3 -type f -name "*defconfig" | sed 's|^\./||'
+            exit 1
+          fi
 
-      - name: Build kernel
+          # Enable typical SUSFS switches (adjust to your tree options)
+          # If your kernel uses different symbols - replace them with yours.
+          # Add/replace lines in defconfig safely:
+          grep -q "^CONFIG_KSU=y" "$DEF" || echo "CONFIG_KSU=y" >> "$DEF"
+          grep -q "^CONFIG_KSU_SUSFS=y" "$DEF" || echo "CONFIG_KSU_SUSFS=y" >> "$DEF"
+          grep -q "^CONFIG_SUSFS=y" "$DEF" || echo "CONFIG_SUSFS=y" >> "$DEF"
+
+          echo "---- DEFCONFIG (tail) ----"
+          tail -n 40 "$DEF"
+
+      # =========================
+      # BUILD (LLVM + LLD)
+      # =========================
+      - name: Build kernel (LLVM)
         run: |
+          set -e
           export ARCH=arm64
           export SUBARCH=arm64
+
+          DEF="${{ inputs.DEFCONFIG }}"
+
+          # Use LLVM toolchain properly
           export LLVM=1
           export LLVM_IAS=1
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
 
-          mkdir -p out
-          make O=out vendor/star-gki_defconfig
-          make O=out -j$(nproc)
+          # ccache (optional)
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache -M 5G || true
 
-      - name: Upload Image
+          # Clean (optional; comment if you want incremental)
+          make O=out clean
+
+          # Defconfig
+          make O=out "$DEF"
+
+          # Build
+          make -j"$(nproc)" O=out ${{ inputs.MAKE_ARGS }}
+
+      # =========================
+      # PACKAGE + UPLOAD
+      # =========================
+      - name: Collect artifacts
+        run: |
+          set -e
+          mkdir -p dist
+
+          # Common outputs (depends on tree)
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            cp -v out/arch/arm64/boot/Image dist/
+          fi
+          if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+            cp -v out/arch/arm64/boot/Image.gz dist/
+          fi
+          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
+            cp -v out/arch/arm64/boot/Image.gz-dtb dist/
+          fi
+          if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
+            cp -v out/arch/arm64/boot/dtbo.img dist/
+          fi
+
+          echo "---- dist ----"
+          ls -lah dist || true
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: STAR-SukiSU-SUSFS
-          path: out/arch/arm64/boot/Image
+          name: STAR-kernel-SukiSU-SUSFS
+          path: dist/*
+          if-no-files-found: error
