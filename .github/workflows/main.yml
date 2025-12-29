@@ -3,163 +3,187 @@ name: Build Star Kernel (SukiSU + SUSFS)
 on:
   workflow_dispatch:
     inputs:
-      DEFCONFIG:
-        description: "Defconfig path (relative). For STAR use: arch/arm64/configs/vendor/star-gki_defconfig"
-        required: true
-        default: "arch/arm64/configs/vendor/star-gki_defconfig"
-      CLANG:
-        description: "Toolchain: proton"
-        required: true
-        default: "proton"
-      MAKE_ARGS:
-        description: "Extra make args"
+      defconfig:
+        description: "Defconfig name under arch/arm64/configs (example: vendor/star-gki_defconfig)"
         required: false
-        default: ""
+        default: "vendor/star-gki_defconfig"
+      jobs:
+        description: "Parallel jobs for make"
+        required: false
+        default: "16"
+      enable_susfs:
+        description: "Enable SUSFS config injection (if your repo has scripts for it)"
+        required: false
+        default: "true"
+      inject_sukisu:
+        description: "Inject SukiSU (if your repo has scripts for it)"
+        required: false
+        default: "true"
+      inject_wildksu:
+        description: "Inject WildKSU (if your repo has scripts for it)"
+        required: false
+        default: "false"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
 
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      DEFCONFIG: ${{ inputs.defconfig }}
+      JOBS: ${{ inputs.jobs }}
+
+      # Official Android LLVM (Google) archive from googlesource.
+      # If you want another clang revision later — change CLANG_REV and the URL accordingly.
+      CLANG_REV: clang-r522817
+      CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           submodules: recursive
+          fetch-depth: 0
 
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential ca-certificates ccache clang curl flex g++ gcc git \
-            libelf-dev libssl-dev lld llvm make ninja-build openssl python3 rsync \
-            unzip wget xz-utils zstd
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates ccache curl flex \
+            git gnupg gperf libelf-dev libncurses-dev libssl-dev \
+            lz4 rsync unzip wget xz-utils zstd python3
 
-      # =========================
-      # TOOLCHAIN (FIXED)
-      # =========================
-      - name: Download Android LLVM (Proton-Clang) - WORKING
-        if: ${{ inputs.CLANG == 'proton' }}
+      - name: Download Android LLVM (Google)
         run: |
+          set -e
           mkdir -p "$HOME/clang"
           cd "$HOME/clang"
-          # Stable, always-working release tag; if you want newer - change the tag/file
-          wget -O proton.tar.zst \
-            https://github.com/kdrag0n/proton-clang/releases/download/2024-01-01/proton-clang-20240101.tar.zst
-          tar -I zstd -xf proton.tar.zst
-          echo "$HOME/clang/proton-clang-20240101/bin" >> $GITHUB_PATH
+          echo "Downloading: $CLANG_URL"
+          wget -O clang.tar.gz "$CLANG_URL"
+          mkdir -p "$CLANG_REV"
+          tar -xzf clang.tar.gz -C "$CLANG_REV"
+          echo "LLVM unpacked to: $HOME/clang/$CLANG_REV"
 
       - name: Verify clang tools
         run: |
+          set -e
+          export PATH="$HOME/clang/$CLANG_REV/bin:$PATH"
           which clang
           clang --version
-          which ld.lld || true
-          ld.lld --version || true
+          which ld.lld
+          ld.lld --version
+          which llvm-ar
+          llvm-ar --version
 
-      # =========================
-      # INJECT WILDKSU (example)
-      # =========================
-      - name: Inject WildKSU
+      # Optional: Inject SukiSU / WildKSU
+      # ВАЖНО: пути скриптов зависят от твоего репо.
+      # Если у тебя другие имена/пути — просто поменяй команды внутри шагов.
+      - name: Inject SukiSU (optional)
+        if: ${{ inputs.inject_sukisu == 'true' }}
         run: |
           set -e
-          # If you already have scripts in repo - keep them and remove this.
-          # Example: pull WildKSU patcher repo
-          rm -rf _wildksu
-          git clone --depth=1 https://github.com/WildKSU/WildKSU.git _wildksu || true
-          if [ -f "_wildksu/apply.sh" ]; then
-            bash _wildksu/apply.sh .
+          echo "Inject SukiSU enabled."
+          if [ -f "./scripts/sukisu/inject.sh" ]; then
+            bash ./scripts/sukisu/inject.sh
+          elif [ -f "./scripts/ksu/inject_sukisu.sh" ]; then
+            bash ./scripts/ksu/inject_sukisu.sh
           else
-            echo "WildKSU apply script not found. If you patch manually - ignore."
+            echo "No SukiSU inject script found. Skipping."
           fi
 
-      # =========================
-      # ENABLE SUSFS (FIXED DEFCONFIG PATH)
-      # =========================
-      - name: Enable SUSFS in defconfig (STAR)
+      - name: Inject WildKSU (optional)
+        if: ${{ inputs.inject_wildksu == 'true' }}
         run: |
           set -e
-          DEF="${{ inputs.DEFCONFIG }}"
-          if [ ! -f "$DEF" ]; then
-            echo "ERROR: DEFCONFIG not found: $DEF"
-            echo "TIP: For STAR use: arch/arm64/configs/vendor/star-gki_defconfig"
-            echo "Available defconfigs (sample):"
-            find arch/arm64/configs -maxdepth 3 -type f -name "*defconfig" | sed 's|^\./||'
+          echo "Inject WildKSU enabled."
+          if [ -f "./scripts/wildksu/inject.sh" ]; then
+            bash ./scripts/wildksu/inject.sh
+          elif [ -f "./scripts/ksu/inject_wildksu.sh" ]; then
+            bash ./scripts/ksu/inject_wildksu.sh
+          else
+            echo "No WildKSU inject script found. Skipping."
+          fi
+
+      - name: Prepare defconfig
+        run: |
+          set -e
+          if [ ! -f "arch/arm64/configs/$DEFCONFIG" ]; then
+            echo "ERROR: defconfig not found: arch/arm64/configs/$DEFCONFIG"
+            echo "Hint: check your available defconfigs under arch/arm64/configs/vendor/"
             exit 1
           fi
+          echo "Using defconfig: $DEFCONFIG"
 
-          # Enable typical SUSFS switches (adjust to your tree options)
-          # If your kernel uses different symbols - replace them with yours.
-          # Add/replace lines in defconfig safely:
-          grep -q "^CONFIG_KSU=y" "$DEF" || echo "CONFIG_KSU=y" >> "$DEF"
-          grep -q "^CONFIG_KSU_SUSFS=y" "$DEF" || echo "CONFIG_KSU_SUSFS=y" >> "$DEF"
-          grep -q "^CONFIG_SUSFS=y" "$DEF" || echo "CONFIG_SUSFS=y" >> "$DEF"
+      # Optional: Enable SUSFS in defconfig (если у тебя есть готовый патчер/скрипт)
+      - name: Enable SUSFS (optional)
+        if: ${{ inputs.enable_susfs == 'true' }}
+        run: |
+          set -e
+          echo "Enable SUSFS requested."
+          # Примеры возможных скриптов. Если у тебя другой — подставь свой.
+          if [ -f "./scripts/susfs/enable.sh" ]; then
+            bash ./scripts/susfs/enable.sh "arch/arm64/configs/$DEFCONFIG"
+          elif [ -f "./scripts/enable_susfs.sh" ]; then
+            bash ./scripts/enable_susfs.sh "arch/arm64/configs/$DEFCONFIG"
+          else
+            echo "No SUSFS enable script found. Skipping."
+          fi
 
-          echo "---- DEFCONFIG (tail) ----"
-          tail -n 40 "$DEF"
-
-      # =========================
-      # BUILD (LLVM + LLD)
-      # =========================
       - name: Build kernel (LLVM)
         run: |
           set -e
-          export ARCH=arm64
-          export SUBARCH=arm64
+          export PATH="$HOME/clang/$CLANG_REV/bin:$PATH"
 
-          DEF="${{ inputs.DEFCONFIG }}"
-
-          # Use LLVM toolchain properly
-          export LLVM=1
-          export LLVM_IAS=1
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-
-          # ccache (optional)
+          # ccache (optional, helps speed)
           export CCACHE_DIR="$HOME/.ccache"
           ccache -M 5G || true
 
-          # Clean (optional; comment if you want incremental)
-          make O=out clean
+          # Clean build dir
+          rm -rf out
+          mkdir -p out
 
-          # Defconfig
-          make O=out "$DEF"
+          # Configure
+          make O=out ARCH=arm64 "$DEFCONFIG"
 
-          # Build
-          make -j"$(nproc)" O=out ${{ inputs.MAKE_ARGS }}
+          # Build with LLVM toolchain
+          make -j"$JOBS" O=out ARCH=arm64 \
+            LLVM=1 LLVM_IAS=1 \
+            CC=clang LD=ld.lld \
+            AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            Image dtbs dtbo.img || make -j"$JOBS" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 Image
 
-      # =========================
-      # PACKAGE + UPLOAD
-      # =========================
       - name: Collect artifacts
         run: |
           set -e
-          mkdir -p dist
+          mkdir -p artifacts
 
-          # Common outputs (depends on tree)
+          # Image
           if [ -f "out/arch/arm64/boot/Image" ]; then
-            cp -v out/arch/arm64/boot/Image dist/
-          fi
-          if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-            cp -v out/arch/arm64/boot/Image.gz dist/
-          fi
-          if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-            cp -v out/arch/arm64/boot/Image.gz-dtb dist/
-          fi
-          if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
-            cp -v out/arch/arm64/boot/dtbo.img dist/
+            cp -v out/arch/arm64/boot/Image artifacts/
           fi
 
-          echo "---- dist ----"
-          ls -lah dist || true
+          # dtbo
+          if [ -f "out/arch/arm64/boot/dtbo.img" ]; then
+            cp -v out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+
+          # dtb(s)
+          if [ -d "out/arch/arm64/boot/dts" ]; then
+            tar -czf artifacts/dts.tar.gz -C out/arch/arm64/boot dts || true
+          fi
+
+          # config
+          if [ -f "out/.config" ]; then
+            cp -v out/.config artifacts/config.txt
+          fi
+
+          ls -lah artifacts || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: STAR-kernel-SukiSU-SUSFS
-          path: dist/*
-          if-no-files-found: error
+          name: star-kernel-${{ github.run_number }}
+          path: artifacts/*
+          if-no-files-found: warn
