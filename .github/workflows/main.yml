@@ -20,8 +20,14 @@ jobs:
         curl -LSs https://raw.githubusercontent.com/WildKernels/Wild_KSU/wild/kernel/setup.sh | bash -s wild
 
     - name: Enable SUSFS
-      run: |
-        sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' arch/arm64/configs/vendor/star_defconfig
+  run: |
+    CONFIG_PATH="arch/arm64/configs/vendor/xiaomi/star_defconfig"
+    if [ ! -f "$CONFIG_PATH" ]; then
+      echo "Defconfig not found!"
+      find arch/arm64/configs -name "*star_defconfig"
+      exit 1
+    fi
+    sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' "$CONFIG_PATH"
 
     - name: Build kernel
       run: |
