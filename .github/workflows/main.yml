@@ -21,7 +21,7 @@ jobs:
 
     - name: Enable SUSFS
       run: |
-        sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' arch/arm64/configs/vendor/xiaomi/star_defconfig
+        sed -i 's/# CONFIG_SUSFS is not set/CONFIG_SUSFS=y/' arch/arm64/configs/vendor/star_defconfig
 
     - name: Build kernel
       run: |
@@ -29,7 +29,7 @@ jobs:
         export SUBARCH=arm64
         export KBUILD_BUILD_USER=Gudzon
         export KBUILD_BUILD_HOST=star
-        make vendor/xiaomi/star_defconfig
+        make vendor/star_defconfig
         make -j$(nproc)
 
     - name: Upload Image
